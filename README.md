@@ -1,8 +1,4 @@
-### Context
-
-Well, what happened was that I was looking for a semi-definitive easy-to-read list of international football matches and couldn't find anything decent. So I took it upon myself to collect it for my own use. I might as well share it.
-
-### Content
+# Content
 
 This dataset includes **49,398 results of international football matches starting from the very first official match in 1872 up to 2024. The matches range from FIFA World Cup to FIFI Wild Cup to regular friendly matches. The matches are strictly men's full internationals and the data does not include Olympic Games or matches where at least one of the teams was the nation's B-team, U-23 or a league select team.
 
@@ -40,24 +36,17 @@ Note on team and country names: For home and away teams the *current* name of th
 
 For country names, the name of the country *at the time of the match* is used. So when Ghana played in Accra, Gold Coast in the 1950s, even though the names of the home team and the country don't match, it was a home match for Ghana. This is indicated by the neutral column, which says FALSE for those matches, meaning it was **not** at a neutral venue.
 
-### Acknowledgements
-
-The data is gathered from several sources including but not limited to Wikipedia, rsssf.com, and individual football associations' websites.
-
-### Inspiration
-
-Some directions to take when exploring the data:
-
--   Who is the best team of all time
--   Which teams dominated different eras of football
--   What trends have there been in international football throughout the ages - home advantage, total goals scored, distribution of teams' strength etc
--   Can we say anything about geopolitics from football fixtures - how has the number of countries changed, which teams like to play each other
--   Which countries host the most matches where they themselves are not participating in
--   How much, if at all, does hosting a major tournament help a country's chances in the tournament
--   Which teams are the most active in playing friendlies and friendly tournaments - does it help or hurt them
-
-The world's your oyster, my friend.
-
-### Contribute
-
-If you notice a mistake or the results are not updated fast enough for your liking, you can fix that by submitting a pull request.
+# Simulador
+Rol: Eres un Científico de Datos especializado en analítica de fútbol de élite. 
+Te he adjuntado tres archivos: la base de datos results.csv, el diccionario de nombres former_names.csv y un script de Python de mi autoría que implementa un ensamble predictivo avanzado (Hybrid Random Forest + MCMC Bayesian Mixture).
+### Instrucciones de Ejecución:
+1. Configura el entorno: Asegúrate de tener los archivos CSV en el mismo directorio de ejecución que el script.
+2. Modifica las variables iniciales: Dentro del código de Python, cambia el valor de las variables EQUIPO_LOCAL y EQUIPO_VISITANTE por las selecciones que te indicaré al final de este prompt.
+3. Ejecuta el código: Corre el script completo en tu entorno interno de Python. El código ya se encarga de aplicar los cruces de habilidad, entrenar los 5000 árboles para el bosque aleatorio y generar el muestreo con la restricción de suma cero para la mezcla bayesiana.
+4. Captura los resultados.
+### Formato de Salida:
+No me expliques el código, no modifiques la metodología y no me narres el proceso. Limítate a ejecutar el script y entregarme textualmente el Reporte Predictivo Avanzado que imprime la consola con las siguientes métricas exactas:
+1. Tasas Esperadas: Los valores de Lambda ($\lambda$) resultantes del ensamble para cada equipo.
+2. Mercado 1X2: Porcentajes exactos de Victoria Local, Empate y Victoria Visitante.
+3. Top 5 Marcadores Exactos: Los resultados con mayor probabilidad porcentual.
+4. Goles Totales: Probabilidad de Ambos Anotan (BTTS) y de la línea de Más/Menos de 1.5, 2.5 y 3.5 Goles (Over/Under).
