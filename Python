@@ -42,10 +42,7 @@ df = results[results['date'] >= FECHA_CORTE].copy()
 # ==========================================
 print("[2/4] Entrenando Hybrid Random Forest (Groll et al. 2019)...")
 
-# A. Calcular "Parámetros de Habilidad" históricos (Base del modelo Poisson para inyectar al RF)
 avg_global = (df['home_score'].mean() + df['away_score'].mean()) / 2
-
-# Fuerzas promedio por equipo
 home_perf = df.groupby('home_team')[['home_score', 'away_score']].mean()
 away_perf = df.groupby('away_team')[['away_score', 'home_score']].mean()
 
@@ -62,7 +59,6 @@ for t in teams:
         'def_ability': ((def_h + def_a) / 2) / avg_global
     }
 
-# B. Inyectar habilidades como covariables (Features)
 df['home_att'] = df['home_team'].map(lambda x: habilidades[x]['att_ability'])
 df['home_def'] = df['home_team'].map(lambda x: habilidades[x]['def_ability'])
 df['away_att'] = df['away_team'].map(lambda x: habilidades[x]['att_ability'])
@@ -74,14 +70,12 @@ X = df[features].fillna(1.0)
 y_home = df['home_score']
 y_away = df['away_score']
 
-# C. Entrenar el Bosque Aleatorio (B=5000 como indica el paper)
 rf_home = RandomForestRegressor(n_estimators=5000, max_features='sqrt', random_state=42, n_jobs=-1)
 rf_away = RandomForestRegressor(n_estimators=5000, max_features='sqrt', random_state=42, n_jobs=-1)
 
 rf_home.fit(X, y_home)
 rf_away.fit(X, y_away)
 
-# Predicción del RF para el partido específico
 X_partido = pd.DataFrame([{
     'home_att': habilidades[EQUIPO_LOCAL]['att_ability'],
     'home_def': habilidades[EQUIPO_LOCAL]['def_ability'],
@@ -99,7 +93,6 @@ lambda_rf_away = rf_away.predict(X_partido)[0]
 print("[3/4] Ejecutando MCMC Bayesiano con Mixture Model (Baio & Blangiardo 2010)...")
 print("      (Esto puede tardar un par de minutos debido al muestreo probabilístico)")
 
-# Mapeo de equipos a índices para PyMC
 lista_equipos = sorted(list(teams))
 team_to_idx = {team: i for i, team in enumerate(lista_equipos)}
 num_teams = len(lista_equipos)
@@ -109,72 +102,62 @@ idx_away = df['away_team'].map(team_to_idx).values
 obs_home = df['home_score'].values
 obs_away = df['away_score'].values
 
-# Modelo PyMC
 with pm.Model() as baio_mixture_model:
-    # 1. Pesos de los 3 grupos (Fondo, Media tabla, Top)
     w = pm.Dirichlet('w', a=np.ones(3))
     
-    # 2. Medias de los grupos para Ataque (Malo=-1, Medio=0, Top=1) y Defensa (Top=-1, Medio=0, Malo=1)
     mu_att_comp = pm.Normal('mu_att_comp', mu=np.array([-1.0, 0.0, 1.0]), sigma=0.5, shape=3)
     mu_def_comp = pm.Normal('mu_def_comp', mu=np.array([1.0, 0.0, -1.0]), sigma=0.5, shape=3)
     
-    # 3. Componente de Mezcla (Mixture) para clasificar a los equipos y evitar Overshrinkage
     atts = pm.Mixture('atts', w=w, comp_dists=pm.Normal.dist(mu=mu_att_comp, sigma=0.5), shape=num_teams)
     defs = pm.Mixture('defs', w=w, comp_dists=pm.Normal.dist(mu=mu_def_comp, sigma=0.5), shape=num_teams)
     
-    # 4. Restricción suma-cero
     atts_star = atts - pm.math.mean(atts)
     defs_star = defs - pm.math.mean(defs)
     
-    # 5. Ecuación log-lineal (Sede neutral, home_advantage = 0)
     theta_home = pm.math.exp(atts_star[idx_home] + defs_star[idx_away])
     theta_away = pm.math.exp(atts_star[idx_away] + defs_star[idx_home])
     
-    # 6. Verosimilitud Poisson
     home_goals = pm.Poisson('home_goals', mu=theta_home, observed=obs_home)
     away_goals = pm.Poisson('away_goals', mu=theta_away, observed=obs_away)
     
-    # Ejecutar muestreo (reducido para velocidad, subir tune/draws para más precisión)
     trace = pm.sample(1000, tune=500, target_accept=0.9, return_inferencedata=False, progressbar=False)
 
-# Extraer parámetros del partido
 idx_eq1 = team_to_idx[EQUIPO_LOCAL]
 idx_eq2 = team_to_idx[EQUIPO_VISITANTE]
 
-# Media posterior de las habilidades (Exp para obtener las tasas lambda en sede neutral)
 lambda_bayes_home = np.exp(trace['atts'][:, idx_eq1].mean() + trace['defs'][:, idx_eq2].mean())
 lambda_bayes_away = np.exp(trace['atts'][:, idx_eq2].mean() + trace['defs'][:, idx_eq1].mean())
-
 
 # ==========================================
 # 4. ENSAMBLE Y CÁLCULO DE PROBABILIDADES
 # ==========================================
 print("\n[4/4] Ensamblando modelos y calculando probabilidades combinadas...")
 
-# Promedio ponderado (Ensamble 50/50 de ambos papers)
 lambda_final_home = (lambda_rf_home + lambda_bayes_home) / 2
 lambda_final_away = (lambda_rf_away + lambda_bayes_away) / 2
 
-# Matriz de Distribución de Poisson Bivariada (Aproximación Independiente)
 max_goles = 7
 matriz = np.zeros((max_goles, max_goles))
 for i in range(max_goles):
     for j in range(max_goles):
         matriz[i, j] = poisson.pmf(i, lambda_final_home) * poisson.pmf(j, lambda_final_away)
 
-# Extracción de Métricas de Valor
 prob_local = np.sum(np.tril(matriz, -1)) * 100
 prob_empate = np.sum(np.diag(matriz)) * 100
 prob_visita = np.sum(np.triu(matriz, 1)) * 100
 
-# Ambos Anotan (BTTS) -> Suma de la matriz excluyendo fila 0 y columna 0
 prob_btts = np.sum(matriz[1:, 1:]) * 100
 
-# Over/Under 2.5 Goles -> Suma de celdas donde i + j > 2
+# Líneas de Goles Múltiples (Over/Under 1.5, 2.5, 3.5)
+prob_over_15 = sum(matriz[i, j] for i in range(max_goles) for j in range(max_goles) if i + j > 1) * 100
+prob_under_15 = 100 - prob_over_15
+
 prob_over_25 = sum(matriz[i, j] for i in range(max_goles) for j in range(max_goles) if i + j > 2) * 100
 prob_under_25 = 100 - prob_over_25
 
-# Top 5 Marcadores
+prob_over_35 = sum(matriz[i, j] for i in range(max_goles) for j in range(max_goles) if i + j > 3) * 100
+prob_under_35 = 100 - prob_over_35
+
 marcadores = []
 for i in range(max_goles):
     for j in range(max_goles):
@@ -201,8 +184,9 @@ print("▶ TOP 5 MARCADORES EXACTOS:")
 for idx, (marcador, prob) in enumerate(top_5, 1):
     print(f"  {idx}. [{EQUIPO_LOCAL} {marcador.split(' - ')[0]} - {marcador.split(' - ')[1]} {EQUIPO_VISITANTE}] : {prob:.2f}%")
 
-print("\n▶ GOLES TOTALES:")
+print("\n▶ GOLES TOTALES (LÍNEAS OVER/UNDER):")
 print(f"  Ambos Equipos Anotan (BTTS): {prob_btts:.2f}%")
-print(f"  Más de 2.5 Goles (Over): {prob_over_25:.2f}%")
-print(f"  Menos de 2.5 Goles (Under): {prob_under_25:.2f}%")
+print(f"  Over 1.5: {prob_over_15:.2f}%  |  Under 1.5: {prob_under_15:.2f}%")
+print(f"  Over 2.5: {prob_over_25:.2f}%  |  Under 2.5: {prob_under_25:.2f}%")
+print(f"  Over 3.5: {prob_over_35:.2f}%  |  Under 3.5: {prob_under_35:.2f}%")
 print("="*50)
