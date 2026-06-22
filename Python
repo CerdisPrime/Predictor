@@ -5,54 +5,64 @@ from sklearn.ensemble import RandomForestRegressor
 import pymc as pm
 import warnings
 
-# Ignorar advertencias menores para un output más limpio
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# CONFIGURACIÓN DEL PARTIDO A SIMULAR
+# CONFIGURACIÓN DEL PARTIDO
 # ==========================================
 EQUIPO_LOCAL = 'Mexico'
 EQUIPO_VISITANTE = 'Germany'
-FECHA_CORTE = '2018-01-01' # Ventana de datos (últimos ciclos mundialistas)
+FECHA_CORTE = '2018-01-01'
 
-print(f"Iniciando Ensamble Algorítmico: {EQUIPO_LOCAL} vs {EQUIPO_VISITANTE}...")
+print(f"Iniciando Ensamble Algorítmico Ponderado: {EQUIPO_LOCAL} vs {EQUIPO_VISITANTE}...")
 
 # ==========================================
-# 1. PREPARACIÓN Y LIMPIEZA DE DATOS
+# 1. PREPARACIÓN Y PONDERACIÓN TEMPORAL (TIME DECAY)
 # ==========================================
-print("\n[1/4] Cargando y procesando bases de datos...")
+print("\n[1/4] Cargando datos y aplicando sistema de pesos temporales...")
 try:
     results = pd.read_csv('results.csv')
     former_names = pd.read_csv('former_names.csv')
 except FileNotFoundError:
-    print("Error: Asegúrate de que 'results.csv' y 'former_names.csv' estén en la misma carpeta que este script.")
+    print("Error: 'results.csv' y 'former_names.csv' no encontrados.")
     exit()
 
-# Homogeneizar nombres
 name_mapping = dict(zip(former_names['former_name'], former_names['current_name']))
 results['home_team'] = results['home_team'].replace(name_mapping)
 results['away_team'] = results['away_team'].replace(name_mapping)
 
-# Filtrar ventana temporal
 results['date'] = pd.to_datetime(results['date'])
 df = results[results['date'] >= FECHA_CORTE].copy()
 
-# ==========================================
-# 2. MODELO 1: HYBRID RANDOM FOREST (Groll et al., 2019)
-# ==========================================
-print("[2/4] Entrenando Hybrid Random Forest (Groll et al. 2019)...")
+df['weight'] = 1.0 # Base (2018 - Jul 2023)
+df.loc[df['date'] >= '2023-08-01', 'weight'] = 3.0 # Ciclo Pre-Mundial
+df.loc[df['date'] >= '2026-06-01', 'weight'] = 6.0 # Torneo Actual (Mayor peso)
 
-avg_global = (df['home_score'].mean() + df['away_score'].mean()) / 2
-home_perf = df.groupby('home_team')[['home_score', 'away_score']].mean()
-away_perf = df.groupby('away_team')[['away_score', 'home_score']].mean()
+# ==========================================
+# 2. MODELO 1: HYBRID RANDOM FOREST PONDERADO (10,000 ÁRBOLES)
+# ==========================================
+print("[2/4] Entrenando Hybrid Random Forest (10,000 árboles) enfocado en estado actual...")
+
+def get_weighted_avg(df_filtered, col_score):
+    if df_filtered.empty or df_filtered['weight'].sum() == 0:
+        return avg_global
+    return np.average(df_filtered[col_score], weights=df_filtered['weight'])
+
+avg_global_home = np.average(df['home_score'], weights=df['weight'])
+avg_global_away = np.average(df['away_score'], weights=df['weight'])
+avg_global = (avg_global_home + avg_global_away) / 2
 
 teams = set(df['home_team']).union(set(df['away_team']))
 habilidades = {}
+
 for t in teams:
-    att_h = home_perf.loc[t, 'home_score'] if t in home_perf.index else avg_global
-    def_h = home_perf.loc[t, 'away_score'] if t in home_perf.index else avg_global
-    att_a = away_perf.loc[t, 'away_score'] if t in away_perf.index else avg_global
-    def_a = away_perf.loc[t, 'home_score'] if t in away_perf.index else avg_global
+    df_h = df[df['home_team'] == t]
+    df_a = df[df['away_team'] == t]
+    
+    att_h = get_weighted_avg(df_h, 'home_score')
+    def_h = get_weighted_avg(df_h, 'away_score')
+    att_a = get_weighted_avg(df_a, 'away_score')
+    def_a = get_weighted_avg(df_a, 'home_score')
     
     habilidades[t] = {
         'att_ability': ((att_h + att_a) / 2) / avg_global,
@@ -69,29 +79,30 @@ features = ['home_att', 'home_def', 'away_att', 'away_def', 'is_neutral']
 X = df[features].fillna(1.0)
 y_home = df['home_score']
 y_away = df['away_score']
+pesos = df['weight']
 
-rf_home = RandomForestRegressor(n_estimators=5000, max_features='sqrt', random_state=42, n_jobs=-1)
-rf_away = RandomForestRegressor(n_estimators=5000, max_features='sqrt', random_state=42, n_jobs=-1)
+# Entrenamiento con 10,000 árboles
+rf_home = RandomForestRegressor(n_estimators=10000, max_features='sqrt', random_state=42, n_jobs=-1)
+rf_away = RandomForestRegressor(n_estimators=10000, max_features='sqrt', random_state=42, n_jobs=-1)
 
-rf_home.fit(X, y_home)
-rf_away.fit(X, y_away)
+rf_home.fit(X, y_home, sample_weight=pesos)
+rf_away.fit(X, y_away, sample_weight=pesos)
 
 X_partido = pd.DataFrame([{
     'home_att': habilidades[EQUIPO_LOCAL]['att_ability'],
     'home_def': habilidades[EQUIPO_LOCAL]['def_ability'],
     'away_att': habilidades[EQUIPO_VISITANTE]['att_ability'],
     'away_def': habilidades[EQUIPO_VISITANTE]['def_ability'],
-    'is_neutral': 1 # Sede neutral (Mundial)
+    'is_neutral': 1 
 }])
 
 lambda_rf_home = rf_home.predict(X_partido)[0]
 lambda_rf_away = rf_away.predict(X_partido)[0]
 
 # ==========================================
-# 3. MODELO 2: MCMC BAYESIAN MIXTURE (Baio & Blangiardo, 2010)
+# 3. MODELO 2: MCMC MIXTURE COMPRIMIDO 
 # ==========================================
-print("[3/4] Ejecutando MCMC Bayesiano con Mixture Model (Baio & Blangiardo 2010)...")
-print("      (Esto puede tardar un par de minutos debido al muestreo probabilístico)")
+print("[3/4] Ejecutando MCMC Bayesiano con Mezcla Comprimida y Verosimilitud Ponderada...")
 
 lista_equipos = sorted(list(teams))
 team_to_idx = {team: i for i, team in enumerate(lista_equipos)}
@@ -101,12 +112,13 @@ idx_home = df['home_team'].map(team_to_idx).values
 idx_away = df['away_team'].map(team_to_idx).values
 obs_home = df['home_score'].values
 obs_away = df['away_score'].values
+weights_array = df['weight'].values
 
 with pm.Model() as baio_mixture_model:
     w = pm.Dirichlet('w', a=np.ones(3))
     
-    mu_att_comp = pm.Normal('mu_att_comp', mu=np.array([-1.0, 0.0, 1.0]), sigma=0.5, shape=3)
-    mu_def_comp = pm.Normal('mu_def_comp', mu=np.array([1.0, 0.0, -1.0]), sigma=0.5, shape=3)
+    mu_att_comp = pm.Normal('mu_att_comp', mu=np.array([-0.5, 0.0, 0.5]), sigma=0.5, shape=3)
+    mu_def_comp = pm.Normal('mu_def_comp', mu=np.array([0.5, 0.0, -0.5]), sigma=0.5, shape=3)
     
     atts = pm.Mixture('atts', w=w, comp_dists=pm.Normal.dist(mu=mu_att_comp, sigma=0.5), shape=num_teams)
     defs = pm.Mixture('defs', w=w, comp_dists=pm.Normal.dist(mu=mu_def_comp, sigma=0.5), shape=num_teams)
@@ -117,8 +129,11 @@ with pm.Model() as baio_mixture_model:
     theta_home = pm.math.exp(atts_star[idx_home] + defs_star[idx_away])
     theta_away = pm.math.exp(atts_star[idx_away] + defs_star[idx_home])
     
-    home_goals = pm.Poisson('home_goals', mu=theta_home, observed=obs_home)
-    away_goals = pm.Poisson('away_goals', mu=theta_away, observed=obs_away)
+    logp_home = pm.logp(pm.Poisson.dist(mu=theta_home), obs_home)
+    pm.Potential('weighted_home', weights_array * logp_home)
+    
+    logp_away = pm.logp(pm.Poisson.dist(mu=theta_away), obs_away)
+    pm.Potential('weighted_away', weights_array * logp_away)
     
     trace = pm.sample(1000, tune=500, target_accept=0.9, return_inferencedata=False, progressbar=False)
 
@@ -131,7 +146,7 @@ lambda_bayes_away = np.exp(trace['atts'][:, idx_eq2].mean() + trace['defs'][:, i
 # ==========================================
 # 4. ENSAMBLE Y CÁLCULO DE PROBABILIDADES
 # ==========================================
-print("\n[4/4] Ensamblando modelos y calculando probabilidades combinadas...")
+print("\n[4/4] Ensamblando modelos...")
 
 lambda_final_home = (lambda_rf_home + lambda_bayes_home) / 2
 lambda_final_away = (lambda_rf_away + lambda_bayes_away) / 2
@@ -148,7 +163,6 @@ prob_visita = np.sum(np.triu(matriz, 1)) * 100
 
 prob_btts = np.sum(matriz[1:, 1:]) * 100
 
-# Líneas de Goles Múltiples (Over/Under 1.5, 2.5, 3.5)
 prob_over_15 = sum(matriz[i, j] for i in range(max_goles) for j in range(max_goles) if i + j > 1) * 100
 prob_under_15 = 100 - prob_over_15
 
@@ -169,10 +183,10 @@ top_5 = marcadores[:5]
 # REPORTE FINAL
 # ==========================================
 print("="*50)
-print(f"REPORTE PREDICTIVO AVANZADO: {EQUIPO_LOCAL} vs {EQUIPO_VISITANTE}")
-print("Metodología: Hybrid Random Forest + MCMC Bayesian Mixture")
+print(f"REPORTE PREDICTIVO (AJUSTE DE FORMA ACTUAL): {EQUIPO_LOCAL} vs {EQUIPO_VISITANTE}")
+print("Metodología: Hybrid Random Forest (10k) + MCMC Bayesian Mixture (Con Ponderación Temporal)")
 print("="*50)
-print(f"Tasas Esperadas (Ensamble):")
+print(f"Tasas Esperadas Dinámicas:")
 print(f"{EQUIPO_LOCAL} (λ): {lambda_final_home:.2f} | {EQUIPO_VISITANTE} (λ): {lambda_final_away:.2f}\n")
 
 print("▶ MERCADO 1X2:")
